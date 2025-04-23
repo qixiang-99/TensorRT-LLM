@@ -2,6 +2,7 @@ import transformers
 
 from .modeling_auto import AutoModelForCausalLM
 from .modeling_bert import BertForSequenceClassification
+from .modeling_clip import CLIPVisionModel
 from .modeling_deepseekv3 import DeepseekV3ForCausalLM
 from .modeling_llama import LlamaForCausalLM
 from .modeling_llava_next import LlavaNextModel
@@ -21,6 +22,7 @@ from .modeling_vila import VilaModel
 __all__ = [
     "AutoModelForCausalLM",
     "BertForSequenceClassification",
+    "CLIPVisionModel",
     "DeepseekV3ForCausalLM",
     "LlamaForCausalLM",
     "LlavaNextModel",
@@ -32,11 +34,11 @@ __all__ = [
     "Qwen2ForProcessRewardModel",
     "Qwen2ForRewardModel",
     "Qwen2MoeForCausalLM",
+    "SiglipVisionModel",
     "get_model_architecture",
     "VilaModel",
     "Qwen2VLModel",
     "Qwen2_5_VLModel",
-    "SiglipVisionModel",
 ]
 
 if transformers.__version__ >= "4.45.1":
