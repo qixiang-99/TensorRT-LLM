@@ -440,6 +440,7 @@ BlockManager::BlockManager(std::vector<SizeType32> const& numKvHeadsPerLayer, Si
     mIsVariableWindow = numUniqueWindowSizes > 1;
     mIsVariableGQA = std::unordered_set(numKvHeadsPerLayer.begin(), numKvHeadsPerLayer.end()).size() > 1;
 
+    // we got the mapping [window size -> number of allocated blocks] for primary and secondary pools
     auto const primaryBlocksPerWindowSize = blocksPerWindowSize(blocksInPrimaryPool, uniqueWindowSizeToLayers);
     std::optional<std::map<SizeType32, SizeType32>> secondaryBlocksPerWindowSize;
     if (blocksInSecondaryPool > 0)
@@ -447,6 +448,7 @@ BlockManager::BlockManager(std::vector<SizeType32> const& numKvHeadsPerLayer, Si
         secondaryBlocksPerWindowSize = blocksPerWindowSize(blocksInSecondaryPool, uniqueWindowSizeToLayers);
     }
 
+    // vector of window sizes for each layer
     mLayerToWindowSize.resize(mNumLayers);
     for (auto const& [windowSize, layersWithWindowSize] : uniqueWindowSizeToLayers)
     {
@@ -1535,6 +1537,57 @@ KVCacheManager::KVCacheManager(std::vector<SizeType32> const& numKvHeadsPerLayer
     , mEnableBlockReuse{mSinkBubbleLength > 0 ? false : enableBlockReuse}
     , mEnableHashKey{enableHashKey}
 {
+    // ------------------------------------------Debug-------------------------------------------------------
+    TLLM_LOG_INFO("KVCacheManager constructor");
+    TLLM_LOG_INFO("KVCacheManager constructor called with parameters:");
+    TLLM_LOG_INFO("  numKvHeadsPerLayer: %s", tc::vec2str(numKvHeadsPerLayer).c_str());
+    TLLM_LOG_INFO("  sizePerHead: %d", sizePerHead);
+    TLLM_LOG_INFO("  tokensPerBlock: %d", tokensPerBlock);
+    TLLM_LOG_INFO("  blocksInPrimaryPool: %d", blocksInPrimaryPool);
+    TLLM_LOG_INFO("  blocksInSecondaryPool: %d", blocksInSecondaryPool);
+    TLLM_LOG_INFO("  maxNumSequences: %d", maxNumSequences);
+    TLLM_LOG_INFO("  maxBeamWidth: %d", maxBeamWidth);
+    TLLM_LOG_INFO("  maxAttentionWindowVec: %s", tc::vec2str(maxAttentionWindowVec).c_str());
+    if (tempAttentionWindowInputs.has_value())
+    {
+        TLLM_LOG_INFO("  tempAttentionWindowInputs: Present");
+        TLLM_LOG_INFO(
+            "    pagedContextFMHA: %s", tempAttentionWindowInputs.value().pagedContextFMHA ? "true" : "false");
+        TLLM_LOG_INFO("    maxInputLen: %d", tempAttentionWindowInputs.value().maxInputLen);
+        TLLM_LOG_INFO("    maxNumTokens: %d", tempAttentionWindowInputs.value().maxNumTokens);
+    }
+    else
+    {
+        TLLM_LOG_INFO("  tempAttentionWindowInputs: Not present");
+    }
+    TLLM_LOG_INFO("  dtype: %d", static_cast<int>(dtype)); // Cast to int for logging
+    TLLM_LOG_INFO("  sinkTokenLength: %d", sinkTokenLength);
+    TLLM_LOG_INFO("  stream: %p", stream.get());
+    if (maxSequenceLength.has_value())
+    {
+        TLLM_LOG_INFO("  maxSequenceLength: %d", maxSequenceLength.value());
+    }
+    else
+    {
+        TLLM_LOG_INFO("  maxSequenceLength: Not present");
+    }
+    TLLM_LOG_INFO("  enableBlockReuse: %s", enableBlockReuse ? "true" : "false");
+    TLLM_LOG_INFO("  onboardBlocks: %s", onboardBlocks ? "true" : "false");
+    TLLM_LOG_INFO("  cacheType: %d", static_cast<int>(cacheType)); // Cast to int for logging
+    if (secondaryOffloadMinPriority.has_value())
+    {
+        TLLM_LOG_INFO("  secondaryOffloadMinPriority: %d", static_cast<int>(secondaryOffloadMinPriority.value()));
+    }
+    else
+    {
+        TLLM_LOG_INFO("  secondaryOffloadMinPriority: Not present");
+    }
+    TLLM_LOG_INFO("  eventManager: %s", eventManager ? "Present" : "Not present");
+    TLLM_LOG_INFO("  enableHashKey: %s", enableHashKey ? "true" : "false");
+    TLLM_LOG_INFO("  enablePartialReuse: %s", enablePartialReuse ? "true" : "false");
+    TLLM_LOG_INFO("  copyOnPartialReuse: %s", copyOnPartialReuse ? "true" : "false");
+    // ------------------------------------------Debug-------------------------------------------------------
+
     TLLM_CHECK_DEBUG(std::find(maxAttentionWindowVec.begin(), maxAttentionWindowVec.end(), mMaxAttentionWindow)
         != maxAttentionWindowVec.end());
     // The sink tokens are stored in blocks separate from other tokens.

@@ -34,6 +34,7 @@ RequestList = list[LlmRequest]
 PeftCacheManagerCpp = tensorrt_llm.bindings.internal.batch_manager.PeftCacheManager
 PeftCacheConfig = tensorrt_llm.bindings.executor.PeftCacheConfig
 WorldConfig = tensorrt_llm.bindings.WorldConfig
+TempAttentionWindowInputs = tensorrt_llm.bindings.internal.batch_manager.TempAttentionWindowInputs
 
 
 def compute_page_count(token_count: int, tokens_per_page: int) -> int:
@@ -112,6 +113,7 @@ class KVCacheManager(BaseResourceManager):
         dtype: DataType = DataType.HALF,
         spec_config: Optional["SpecConfig"] = None,
         layer_mask: Optional[List[bool]] = None,
+        max_num_tokens: int = 8192,
     ) -> None:
         self.mapping = mapping
         self.dtype = dtype
@@ -198,7 +200,13 @@ class KVCacheManager(BaseResourceManager):
             self.max_seq_len = max_atten_window_upper_bound
 
         self.max_attention_window = max_attention_window if kv_cache_type == CacheTypeCpp.SELF else self.max_seq_len
-
+        print(
+            f"max_attention_window: {max_attention_window}, self.max_seq_len: {self.max_seq_len}"
+        )
+        temp_attention_window_inputs = TempAttentionWindowInputs()
+        temp_attention_window_inputs.paged_context_fmha = True
+        temp_attention_window_inputs.max_input_len = self.max_seq_len
+        temp_attention_window_inputs.max_num_tokens = max_num_tokens
         # Note that this stream is unused for now. Will be used for copying to host
         # when that feature is enabled.
         self._stream = torch.cuda.Stream()
@@ -210,8 +218,9 @@ class KVCacheManager(BaseResourceManager):
             'blocks_in_secondary_pool': self.blocks_in_secondary_pool,
             'max_num_sequences': max_batch_size,
             'max_beam_width': 1,  # TODO: more than 1 beam?
-            'max_attention_window_vec': [self.max_attention_window],
-            'temp_attention_window_inputs': None,
+            # 'max_attention_window_vec': [self.max_attention_window],
+            'max_attention_window_vec': [512] * 5 + [self.max_seq_len],
+            'temp_attention_window_inputs': temp_attention_window_inputs,
             'dtype': dtype,
             'sink_token_length': sink_token_length,
             'stream': self._stream.cuda_stream,
@@ -222,6 +231,9 @@ class KVCacheManager(BaseResourceManager):
             'enable_partial_reuse': kv_cache_config.enable_partial_reuse,
             'copy_on_partial_reuse': kv_cache_config.copy_on_partial_reuse,
         }
+        print(
+            f"================================\nkwargs: {kwargs}\n================================\n"
+        )
         if self.event_buffer_max_size > 0:
             kwargs['event_manager'] = KVCacheEventManagerCpp(
                 max_kv_event_entries=self.event_buffer_max_size)

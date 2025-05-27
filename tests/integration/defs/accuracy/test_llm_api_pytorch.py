@@ -310,7 +310,7 @@ class TestGemma3_1BInstruct(LlmapiAccuracyTestHarness):
     MODEL_PATH = f"{llm_models_root()}/gemma/gemma-3-1b-it/"
 
     def test_auto_dtype(self):
-        with LLM(self.MODEL_PATH) as llm:
+        with LLM(self.MODEL_PATH, max_seq_len=3100, max_num_tokens=8192) as llm:
             task = CnnDailymail(self.MODEL_NAME)
             task.evaluate(llm)
 

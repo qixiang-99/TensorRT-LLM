@@ -1133,6 +1133,7 @@ private:
     bool mIsVariableWindow;
     bool mIsVariableGQA;
 
+    // map of window sizes to window block managers, e.g. 1024 -> WindowBlockManager, 512 -> WindowBlockManager, etc.
     std::map<SizeType32, WindowBlockManager> mWindowBlockManagers;
     std::map<SizeType32, WindowSizeMetadata> mWindowSizeToMetadata;
     std::vector<SizeType32> mLayerToWindowSize;
