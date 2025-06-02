@@ -1208,7 +1208,9 @@ void WindowBlockManager::allocateBlock(GenerationRequest& sequence, bool shareAm
     auto const beamWidth = sequence.getBeamWidth();
     auto const requiredBlocks = shareAmongBeams ? 1 : beamWidth;
 
-    TLLM_CHECK_WITH_INFO(hasFreeBlocks(requiredBlocks), "Can't allocate new blocks. No free blocks left.");
+    TLLM_CHECK_WITH_INFO(hasFreeBlocks(requiredBlocks),
+        "Can't allocate new blocks. No free blocks left. requiredBlocks: " + std::to_string(requiredBlocks)
+            + ", freeBlocks: " + std::to_string(getNumFreeBlocks()));
 
     if (shareAmongBeams)
     {

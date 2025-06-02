@@ -128,6 +128,23 @@ def get_token_num_for_estimation(executor_config, model_config):
         # that cannot be reused. For each sequence of max_num_tokens length, we may need up to one extra
         # block (tokens_per_block tokens) if the sequence length is not perfectly divisible by tokens_per_block.
         # So we add math.ceil(max_num_tokens/max_seq_len) * tokens_per_block extra tokens.
+        # print the values of the variables to know which one is returned
+        # For the first argument of max()
+        print(f"================================================")
+        print(
+            f"executor_config.max_batch_size: {executor_config.max_batch_size}")
+        # For the second argument of max()
+        calculated_max_num_tokens_with_block_adjustment = executor_config.max_num_tokens + \
+                                                       math.ceil(executor_config.max_num_tokens / executor_config.max_seq_len) * \
+                                                       executor_config.tokens_per_block
+        print(
+            f"executor_config.max_num_tokens + math.ceil(executor_config.max_num_tokens / executor_config.max_seq_len) * executor_config.tokens_per_block: {calculated_max_num_tokens_with_block_adjustment}"
+        )
+        # For the third argument of max()
+        print(f"executor_config.max_seq_len: {executor_config.max_seq_len}")
+        # For the second argument of min()
+        print(f"max_tokens_limit: {max_tokens_limit}")
+        print(f"================================================")
         return min(
             max(
                 executor_config.max_batch_size, executor_config.max_num_tokens +
@@ -295,6 +312,14 @@ def create_kv_cache_manager(model_engine: PyTorchModelEngine, mapping: Mapping,
             print("executor_config.max_seq_len", executor_config.max_seq_len)
             print("executor_config.max_num_tokens",
                   executor_config.max_num_tokens)
+            binding_model_config = model_engine.model.model_config.get_bindings_model_config(
+            )
+            print("binding_model_config.max_seq_len",
+                  binding_model_config.max_seq_len)
+            print("binding_model_config.max_num_tokens",
+                  binding_model_config.max_num_tokens)
+            print("binding_model_config.layer_types",
+                  binding_model_config.layer_types)
             kv_cache_manager = KVCacheManager(
                 executor_config.kv_cache_config,
                 tensorrt_llm.bindings.internal.batch_manager.CacheType.SELF,
@@ -308,7 +333,7 @@ def create_kv_cache_manager(model_engine: PyTorchModelEngine, mapping: Mapping,
                 dtype=kv_cache_dtype,
                 spec_config=spec_config,
                 max_num_tokens=executor_config.max_num_tokens,
-            )
+                model_config=binding_model_config)
         # KVCacheManager (Non-draft) modifies the max_seq_len field, update it to executor_config
         if model_engine.kv_cache_manager_key == KV_CACHE_MANAGER_KEY:
             executor_config.max_seq_len = kv_cache_manager.max_seq_len

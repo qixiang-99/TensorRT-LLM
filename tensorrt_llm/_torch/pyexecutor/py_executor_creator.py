@@ -177,6 +177,11 @@ def create_py_executor(executor_config: ExecutorConfig,
         if 'cp_type' not in mapping.cp_config:
             executor_config.kv_cache_config.max_tokens = get_token_num_for_estimation(
                 executor_config, model_engine.model.model_config)
+            print(f"===========create_py_executor================")
+            print(
+                f"max_tokens is set to: {executor_config.kv_cache_config.max_tokens}"
+            )
+            print(f"===========create_py_executor================")
         kv_cache_manager = create_kv_cache_manager(model_engine, mapping,
                                                    executor_config)
         draft_kv_cache_manager = create_kv_cache_manager(
