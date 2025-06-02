@@ -24,6 +24,8 @@ if ENABLE_MULTI_DEVICE:
 if TYPE_CHECKING:
     from ..speculative.interface import SpecConfig
 
+ExecutorKvCacheConfig = tensorrt_llm.bindings.executor.KvCacheConfig
+BufferManagerCpp = tensorrt_llm.bindings.internal.runtime.BufferManager
 KVCacheManagerCpp = tensorrt_llm.bindings.internal.batch_manager.KVCacheManager
 KvCacheConfigCpp = tensorrt_llm.bindings.KvCacheConfig
 CacheTypeCpp = tensorrt_llm.bindings.internal.batch_manager.CacheType
@@ -114,7 +116,11 @@ class KVCacheManager(BaseResourceManager):
         spec_config: Optional["SpecConfig"] = None,
         layer_mask: Optional[List[bool]] = None,
         max_num_tokens: int = 8192,
+        model_config: Optional[
+            ModelConfig] = None,  # TODO: refactor here and remove unnecessary parameters(num_layers, num_kv_heads, head_dim, tokens_per_block, max_seq_len, max_batch_size)
     ) -> None:
+        print(f"max_seq_len: {max_seq_len}")
+        kv_cache_config = KvCacheConfigCpp(kv_cache_config)
         self.mapping = mapping
         self.dtype = dtype
         self.kv_cache_type = kv_cache_type
@@ -167,24 +173,32 @@ class KVCacheManager(BaseResourceManager):
         if kv_cache_config.max_attention_window is None:
             max_attention_window = max_seq_len
         else:
-            assert len(
-                kv_cache_config.max_attention_window
-            ) == 1, "Python KvCacheManager doesn't currently support variable window attention"
-            max_attention_window = kv_cache_config.max_attention_window[0]
+            max_attention_window = kv_cache_config.max_attention_window
 
         sink_token_length = (kv_cache_config.sink_token_length
                              if kv_cache_config.sink_token_length is not None
                              else 0)
 
-        self.blocks_in_primary_pool, self.blocks_in_secondary_pool = self.calculate_max_num_blocks(
-            kv_cache_config,
-            head_dim=head_dim,
-            tokens_per_block=tokens_per_block,
-            mapping=mapping,
-            dtype=dtype,
-            kv_factor=self.kv_factor,
+        # self.blocks_in_primary_pool, self.blocks_in_secondary_pool = self.calculate_max_num_blocks(
+        #     kv_cache_config,
+        #     head_dim=head_dim,
+        #     tokens_per_block=tokens_per_block,
+        #     mapping=mapping,
+        #     dtype=dtype,
+        #     kv_factor=self.kv_factor,
+        # )
+        self.blocks_in_primary_pool, self.blocks_in_secondary_pool = self.calculate_max_num_blocks_from_cpp(
+            kv_cache_config, model_config, extra_cost_memory=0)
+        print(
+            "====================KVCacheManager init============================"
+        )
+        print(f"self.blocks_in_primary_pool: {self.blocks_in_primary_pool}")
+        print(f"self.blocks_in_secondary_pool: {self.blocks_in_secondary_pool}")
+        print(
+            "====================KVCacheManager init============================"
         )
 
+        # TODO: replace here or not?
         max_atten_window_upper_bound = self.get_max_atten_window_upper_bound(
             blocks_in_primary_pool=self.blocks_in_primary_pool,
             tokens_per_block=tokens_per_block,
@@ -198,6 +212,7 @@ class KVCacheManager(BaseResourceManager):
             )
             max_attention_window = max_atten_window_upper_bound
             self.max_seq_len = max_atten_window_upper_bound
+            print(f"self.max_seq_le is overridden to {self.max_seq_len}")
 
         self.max_attention_window = max_attention_window if kv_cache_type == CacheTypeCpp.SELF else self.max_seq_len
         print(
@@ -221,6 +236,7 @@ class KVCacheManager(BaseResourceManager):
             'max_num_sequences': max_batch_size,
             'max_beam_width': 1,  # TODO: more than 1 beam?
             # 'max_attention_window_vec': [self.max_attention_window],
+            # 'temp_attention_window_inputs': None,
             'max_attention_window_vec': [512] * 5 + [self.max_seq_len],
             'temp_attention_window_inputs': temp_attention_window_inputs,
             'dtype': dtype,
@@ -356,6 +372,14 @@ class KVCacheManager(BaseResourceManager):
                              encoder_input_tokens=encoder_input_tokens)
             req.paged_kv_block_ids = []
             if prepare_resource:
+                print(
+                    f"====================add_dummy_requests============================"
+                )
+                free_blocks = self.get_num_free_blocks()
+                print(f"free_blocks: {free_blocks}")
+                print(
+                    f"====================add_dummy_requests============================"
+                )
                 self.impl.add_sequence(req_id, token_num, beam_width, req)
             if is_gen:
                 req.state = LlmRequestState.GENERATION_IN_PROGRESS
@@ -404,6 +428,10 @@ class KVCacheManager(BaseResourceManager):
 
         assert free_mem_fraction < 1.0, f"Invalid freeMemFraction, freeMemFraction {free_mem_fraction} must be smaller than 1.0"
         max_tokens = free_mem_fraction * free_mem / cache_size_bytes_per_token
+        print(
+            f"===============calculate_max_num_blocks log================================="
+        )
+        print(f"max_tokens calculated by free_mem_fraction: {max_tokens}")
 
         # If user specified a number of tokens
         if kv_cache_config.max_tokens is not None:
@@ -415,6 +443,9 @@ class KVCacheManager(BaseResourceManager):
                 )
             else:
                 max_tokens = kv_cache_config.max_tokens
+            print(
+                f"max_tokens is set by kv_cache_config.max_tokens: {max_tokens}"
+            )
 
         if mapping.world_size > 1:
             # make sure all ranks use same value for maxTokens
@@ -426,6 +457,9 @@ class KVCacheManager(BaseResourceManager):
         max_tokens_secondary = host_cache_size / cache_size_bytes_per_token
         blocks_in_secondary_pool = max(
             0, int(max_tokens_secondary / tokens_per_block))
+        print(
+            f"===============calculate_max_num_blocks log================================="
+        )
         return blocks_in_primary_pool, blocks_in_secondary_pool
 
     def get_max_atten_window_upper_bound(self, blocks_in_primary_pool,
@@ -505,6 +539,48 @@ class KVCacheManager(BaseResourceManager):
 
     def rewind_kv_cache(self, request: LlmRequest, rewind_len: int):
         self.impl.rewind_kv_cache(request.py_request_id, rewind_len)
+
+    def calculate_max_num_blocks_from_cpp(
+            self,
+            kv_cache_config: KvCacheConfigCpp,
+            model_config: ModelConfig,
+            extra_cost_memory: int = 0) -> Tuple[int, int]:
+        """
+        Calculates the maximum number of KV cache blocks using the C++ implementation.
+
+        Args:
+            kv_cache_config: The KV cache configuration object.
+            model_config: The model configuration object.
+            extra_cost_memory: Extra memory in bytes to exclude from available memory.
+
+        Returns:
+            A tuple (blocks_in_primary_pool, blocks_in_secondary_pool).
+        """
+
+        # Construct WorldConfig from self.mapping
+        world_config_cpp = WorldConfig(
+            tensor_parallelism=self.mapping.tp_size,
+            pipeline_parallelism=self.mapping.pp_size,
+            rank=self.mapping.rank,
+            gpus_per_node=self.mapping.gpus_per_node)
+
+        # Construct a temporary BufferManager.
+        # The C++ calculate_max_num_blocks uses this to query memory stats.
+        # Default manage_memory=False is used.
+        buffer_manager_cpp = BufferManagerCpp(
+            torch.cuda.current_stream().cuda_stream)
+
+        # Call the C++ static method
+        # KVCacheManagerCpp is tensorrt_llm.bindings.internal.batch_manager.KVCacheManager
+        blocks_in_primary_pool, blocks_in_secondary_pool = KVCacheManagerCpp.calculate_max_num_blocks(
+            config=kv_cache_config,
+            dtype=self.dtype,
+            model_config=model_config,
+            world_config=world_config_cpp,
+            buffer_manager=buffer_manager_cpp,
+            kvFactor=self.kv_factor,
+            extra_cost_memory=extra_cost_memory)
+        return int(blocks_in_primary_pool), int(blocks_in_secondary_pool)
 
 
 class MambaCacheManager(BaseResourceManager):

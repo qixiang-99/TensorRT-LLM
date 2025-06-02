@@ -307,6 +307,11 @@ def create_py_executor(executor_config: ExecutorConfig,
         with mem_monitor.observe_creation_stage(
                 _ExecutorCreationStage.INIT_KV_CACHE
                 if estimating_kv_cache else _ExecutorCreationStage.KV_CACHE):
+            print(f"===========create_py_executor================")
+            print(
+                f"max_tokens is set to: {executor_config.kv_cache_config.max_tokens}"
+            )
+            print(f"===========create_py_executor================")
             kv_cache_manager = create_kv_cache_manager(model_engine, mapping,
                                                        executor_config)
             draft_kv_cache_manager = create_kv_cache_manager(
