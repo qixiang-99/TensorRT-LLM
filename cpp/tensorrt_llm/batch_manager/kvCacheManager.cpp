@@ -1193,9 +1193,8 @@ void WindowBlockManager::allocateBlock(GenerationRequest& sequence, bool shareAm
     auto const beamWidth = sequence.getBeamWidth();
     auto const requiredBlocks = shareAmongBeams ? 1 : beamWidth;
 
-    TLLM_CHECK_WITH_INFO(hasFreeBlocks(requiredBlocks),
-        "Can't allocate new blocks. No free blocks left. requiredBlocks: " + std::to_string(requiredBlocks)
-            + ", freeBlocks: " + std::to_string(getNumFreeBlocks()));
+    TLLM_CHECK_WITH_INFO(
+        hasFreeBlocks(requiredBlocks), mLogPrefix + " Can't allocate new blocks. No free blocks left.");
 
     if (shareAmongBeams)
     {
@@ -1530,8 +1529,12 @@ KVCacheManager::KVCacheManager(std::vector<SizeType32> const& numKvHeadsPerLayer
     TLLM_LOG_INFO("  numKvHeadsPerLayer: %s", tc::vec2str(numKvHeadsPerLayer).c_str());
     TLLM_LOG_INFO("  sizePerHead: %d", sizePerHead);
     TLLM_LOG_INFO("  tokensPerBlock: %d", tokensPerBlock);
-    TLLM_LOG_INFO("  blocksInPrimaryPool: %d", blocksInPrimaryPool);
-    TLLM_LOG_INFO("  blocksInSecondaryPool: %d", blocksInSecondaryPool);
+    // print blocksPerWindow
+    for (auto const& [windowSize, blocksTuple] : blocksPerWindow)
+    {
+        TLLM_LOG_INFO("  blocksPerWindow: windowSize: %d, primaryBlocks: %d, secondaryBlocks: %d", windowSize,
+            std::get<0>(blocksTuple), std::get<1>(blocksTuple));
+    }
     TLLM_LOG_INFO("  maxNumSequences: %d", maxNumSequences);
     TLLM_LOG_INFO("  maxBeamWidth: %d", maxBeamWidth);
     TLLM_LOG_INFO("  maxAttentionWindowVec: %s", tc::vec2str(maxAttentionWindowVec).c_str());
@@ -1944,6 +1947,10 @@ void KVCacheManager::addSequence(
         // Consider the temporaryAttentionWindow when allocating blocks.
         auto const effectiveInputLength = std::min(inputLength, maxTokenNum + temporaryAttentionWindow);
         auto const numContextBlocks = tc::ceilDiv(effectiveInputLength, getTokensPerBlock());
+        TLLM_LOG_DEBUG(
+            "KVCacheManager::addSequence: inputLength: %d, effectiveInputLength: %d, numContextBlocks: %d, isCyclic: "
+            "%d, mEnableBlockReuse: %d",
+            inputLength, effectiveInputLength, numContextBlocks, sequence.isCyclic(), mEnableBlockReuse);
         if (!sequence.isCyclic() && mEnableBlockReuse)
         {
             mBlockManager.addSequence(sequence, effectiveInputLength, numContextBlocks, *llmRequest, windowSize);
@@ -1959,6 +1966,9 @@ void KVCacheManager::addSequence(
                     "have no effect.",
                     llmRequest->mRequestId);
             }
+            // NOTE: pytorch goes here
+            TLLM_LOG_DEBUG("BlockManager::addSequence: numContextBlocks: %d, unsharedBlockIdx: %d, windowSize: %d",
+                numContextBlocks, unsharedBlockIdx, windowSize);
             mBlockManager.addSequence(sequence, numContextBlocks, unsharedBlockIdx, windowSize);
             if (mEnableHashKey && llmRequest.has_value() && beamWidth == 1)
             {
@@ -2128,7 +2138,6 @@ std::tuple<uint64_t, uint64_t> BaseKVCacheManager::calculateFreeMemBytes(
     auto const finalFreeMem = freeMem + bufferManager.memoryPoolFree();
     TLLM_LOG_INFO("Memory usage when calculating max tokens in paged kv cache: total: %0.2f GiB, available: %0.2f GiB",
         totalMem / static_cast<double>(1 << 30), finalFreeMem / static_cast<double>(1 << 30));
-    TLLM_CHECK_WITH_INFO(finalFreeMem <= totalMem, "Free memory cannot exceed total memory");
 
     auto const freePrimaryMemBytes = static_cast<uint64_t>(finalFreeMem * freeMemFraction);
     auto const freeSecondaryMemBytes = config.hostCacheSize.value_or(0);
@@ -2179,10 +2188,11 @@ BlocksPerWindow BaseKVCacheManager::calculateMaxNumBlocks(KvCacheConfig const& c
         isCrossAttention ? "Cross KvCacheManager" : "Self KvCacheManager", allottedPrimaryMemBytes,
         allottedSecondaryMemBytes);
 
-    if (config.maxTokens.has_value() && windowSizeToLayers.size() > 1)
+    if (config.maxTokens.has_value())
     {
-        TLLM_LOG_WARNING(
-            "Setting maxTokens when using Variable Sliding Window Attention is a strange concept, as it limits "
+        auto const isVSWA = windowSizeToLayers.size() > 1;
+        TLLM_LOG_WARNING(!isVSWA,
+            "Semantically, when using Variable Sliding Window Attention maxTokens is a strange concept, as it limits "
             "the number of max tokens *per window size* [limiting the sum of all window sizes is even stranger]. "
             "Anticipating the effects of this requires quite a complex calculation, and it probably isn't the "
             "configuration you meant to use.");
@@ -2209,15 +2219,14 @@ BlocksPerWindow BaseKVCacheManager::calculateMaxNumBlocks(KvCacheConfig const& c
         = [&](SizeType32 windowSize, float windowSizeShare, SizeType32 cacheSizeBytesPerToken)
     {
         TLLM_LOG_DEBUG("windowSizeShare: %f, cacheSizeBytesPerToken: %d", windowSizeShare, cacheSizeBytesPerToken);
-        auto maxTokens = static_cast<uint64_t>(
+        auto maxTokens = static_cast<SizeType32>(
             allottedPrimaryMemBytes * windowSizeShare / static_cast<double>(cacheSizeBytesPerToken));
         if (config.maxTokens.has_value())
         {
-            auto const maxTokensFromConfig = static_cast<uint64_t>(config.maxTokens.value());
-            TLLM_LOG_INFO("Maximum kv-cache token overridden by configuration as '%ld'.", maxTokensFromConfig);
-            maxTokens = std::min(maxTokensFromConfig, maxTokens);
+            TLLM_LOG_INFO("Maximum kv-cache token overridden by configuration as '%i'.", config.maxTokens.value());
+            maxTokens = std::min(config.maxTokens.value(), maxTokens);
         }
-        TLLM_LOG_INFO("Primary maxTokens for windowSize %d: %ld", windowSize, maxTokens);
+        TLLM_LOG_INFO("Primary maxTokens for windowSize %d: %d", windowSize, maxTokens);
         SizeType32 const blocksInPrimaryPool = tc::ceilDiv(maxTokens, tokensPerBlock);
         TLLM_LOG_INFO(
             "Number of blocks in KV cache primary pool for windowSize %d: %d", windowSize, blocksInPrimaryPool);
@@ -2359,17 +2368,16 @@ runtime::ITensor::SharedPtr KVCacheManager::getPrimaryPool(SizeType32 layer_idx)
 
 SizeType32 KVCacheManager::getMaxCapacityBatchSize(SizeType32 inputLength, SizeType32 outputLength) const
 {
-    auto minMaxBatchSizeAllWindows = std::numeric_limits<SizeType32>::max();
+    auto max = 0;
     for (auto const [windowSize, metadata] : mBlockManager.getWindowSizesMetadata())
     {
         auto const blockRequirementsPerSequence = KVCacheManager::calculateMaxBlockRequirements(
             inputLength, outputLength, mSinkBlockTokenLength, windowSize, mMaxBeamWidth, mTokensPerBlock);
-        auto const maxBatchSizeWindow = metadata.allottedPrimaryBlocks / blockRequirementsPerSequence;
-        // The window with the *smallest* max batch size is the limiting factor
-        // Hence, the std::*min* of all the max batch sizes is chosen
-        minMaxBatchSizeAllWindows = std::min(minMaxBatchSizeAllWindows, maxBatchSizeWindow);
+        auto const maxBatchSize = blockRequirementsPerSequence / metadata.allottedPrimaryBlocks;
+        max = std::max(max, maxBatchSize);
     }
-    return minMaxBatchSizeAllWindows;
+
+    return max;
 }
 
 SizeType32 KVCacheManager::calculateMaxBlockRequirementsPerBeam(

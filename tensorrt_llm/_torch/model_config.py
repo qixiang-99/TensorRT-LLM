@@ -277,7 +277,7 @@ class ModelConfig(Generic[TConfig]):
         model_config_cpp.mlp_hidden_size = mlp_hidden_size
         model_config_cpp.size_per_head = head_size
 
-        # TODO: qixiang- this is a hack to support the effort to switch to KvCacheManagerCpp
+        # NOTE: this method is not robust, for Gemma3ForCausalLM only
         layer_types = self.get_layer_types()
         if layer_types is not None:
             model_config_cpp.layer_types = layer_types
@@ -300,6 +300,10 @@ class ModelConfig(Generic[TConfig]):
         return mlp_hidden_size
 
     def get_layer_types(self) -> Optional[List[LayerTypeCpp]]:
+        """
+        This method is a hack to support the effort to switch to KvCacheManagerCpp.
+        Currently, it is only tested for Gemma3ForCausalLM. For other models, it will return None.
+        """
         if self.pretrained_config.architectures[0] in ["Gemma3ForCausalLM"]:
             logger.debug(
                 f"Setting layer types for {self.pretrained_config.architectures}"

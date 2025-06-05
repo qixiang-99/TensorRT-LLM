@@ -304,14 +304,23 @@ def create_py_executor(executor_config: ExecutorConfig,
             estimating_kv_cache = True
             executor_config.kv_cache_config.max_tokens = get_token_num_for_estimation(
                 executor_config, model_engine.model.model_config)
+            maw = executor_config.kv_cache_config.max_attention_window
+            if maw is not None:
+                unique_windows = list(set(maw))
+                if len(unique_windows) > 1:
+                    # NOTE: For sliding window, we need to allocate more tokens(max_num_tokens + window_size) for each window, need to update if this requirement changes
+                    assert len(
+                        unique_windows
+                    ) == 2, "Sliding window with more than 2 window sizes has not been tested"
+                    # sliding window is the one that is not the executor_config.max_seq_len
+                    sliding_window = unique_windows[0] if unique_windows[
+                        0] != executor_config.max_seq_len else unique_windows[1]
+                    executor_config.kv_cache_config.max_tokens += (
+                        executor_config.max_num_tokens + sliding_window)
+
         with mem_monitor.observe_creation_stage(
                 _ExecutorCreationStage.INIT_KV_CACHE
                 if estimating_kv_cache else _ExecutorCreationStage.KV_CACHE):
-            print(f"===========create_py_executor================")
-            print(
-                f"max_tokens is set to: {executor_config.kv_cache_config.max_tokens}"
-            )
-            print(f"===========create_py_executor================")
             kv_cache_manager = create_kv_cache_manager(model_engine, mapping,
                                                        executor_config)
             draft_kv_cache_manager = create_kv_cache_manager(
@@ -379,6 +388,11 @@ def create_py_executor(executor_config: ExecutorConfig,
                 dist, resources, mapping, pytorch_backend_config,
                 executor_config, ctx_chunk_config, model_engine,
                 draft_model_engine, False, sampler, lora_config)
+
+    maw = executor_config.kv_cache_config.max_attention_window
+    if maw and len(set(maw)) == 2:
+        executor_config.kv_cache_config.max_tokens += (
+            executor_config.max_num_tokens + 512)
 
     py_executor.start_worker()
     return py_executor

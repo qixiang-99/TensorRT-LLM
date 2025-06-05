@@ -23,8 +23,9 @@ from .config_utils import is_mla, is_nemotron_hybrid
 from .kv_cache_transceiver import AttentionTypeCpp, create_kv_cache_transceiver
 from .model_engine import KV_CACHE_MANAGER_KEY, PyTorchModelEngine
 from .py_executor import PyExecutor
-from .resource_manager import (KVCacheManager, MambaHybridCacheManager,
-                               PeftCacheManager, ResourceManager)
+from .resource_manager import (KvCacheConfigCpp, KVCacheManager,
+                               MambaHybridCacheManager, PeftCacheManager,
+                               ResourceManager)
 from .sampler import (EarlyStopSampler, TorchSampler, TorchStarAttentionSampler,
                       TRTLLMSampler)
 from .scheduler import (BindCapacityScheduler, BindMicroBatchScheduler,
@@ -291,18 +292,15 @@ def create_kv_cache_manager(model_engine: PyTorchModelEngine, mapping: Mapping,
             spec_config=spec_config,
         )
     else:
-        print("executor_config.max_seq_len", executor_config.max_seq_len)
-        print("executor_config.max_num_tokens", executor_config.max_num_tokens)
+        # NOTE: this is a workaround for VSWA to switch to calculate_max_num_blocks_from_cpp in KVCahceManager
+        is_vswa = executor_config.kv_cache_config.max_attention_window is not None and len(
+            set(executor_config.kv_cache_config.max_attention_window)) > 1
         binding_model_config = model_engine.model.model_config.get_bindings_model_config(
-        )
-        print("binding_model_config.max_seq_len",
-              binding_model_config.max_seq_len)
-        print("binding_model_config.max_num_tokens",
-              binding_model_config.max_num_tokens)
-        print("binding_model_config.layer_types",
-              binding_model_config.layer_types)
+        ) if is_vswa else None
+
         kv_cache_manager = KVCacheManager(
-            executor_config.kv_cache_config,
+            # NOTE: from tensorrt_llm.bindings.executor.KvCacheConfig to tensorrt_llm.bindings.KvCacheConfig
+            KvCacheConfigCpp(executor_config.kv_cache_config),
             tensorrt_llm.bindings.internal.batch_manager.CacheType.SELF,
             num_layers=num_hidden_layers,
             num_kv_heads=num_key_value_heads,
