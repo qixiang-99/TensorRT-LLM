@@ -455,6 +455,8 @@ class TestGemma3_1BInstruct(LlmapiAccuracyTestHarness):
         with LLM(self.MODEL_PATH) as llm:
             task = CnnDailymail(self.MODEL_NAME)
             task.evaluate(llm)
+            task = GSM8K(self.MODEL_NAME)
+            task.evaluate(llm)
 
     def test_auto_dtype_vswa(self):
         kv_cache_config = KvCacheConfig(
@@ -463,6 +465,8 @@ class TestGemma3_1BInstruct(LlmapiAccuracyTestHarness):
             max_attention_window=[512, 512, 512, 512, 512, 32768])
         with LLM(self.MODEL_PATH, kv_cache_config=kv_cache_config) as llm:
             task = CnnDailymail(self.MODEL_NAME)
+            task.evaluate(llm)
+            task = GSM8K(self.MODEL_NAME)
             task.evaluate(llm)
 
 
