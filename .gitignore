@@ -65,3 +65,16 @@ CMakeUserPresets.json
 compile_commands.json
 *.bin
 .dir-locals.el
+
+lm-eval/
+
+# Debug files
+*.pt
+*.onnx
+*.engine
+*.engine.config
+*.cache
+*.nsys-rep
+*.npy
+*.log
+*.pkl

@@ -25,6 +25,39 @@ from .modeling_utils import (DecoderModel, DecoderModelForCausalLM,
                              duplicate_kv_weight, filter_weights,
                              register_auto_model)
 
+# Global debug flag
+DEBUG_INTERMEDIATE_OUTPUTS = True
+SAVE_DEBUG_TENSORS = True  # Set to True to save tensors to files
+
+
+def debug_log_tensor(name: str, tensor: torch.Tensor, layer_idx: int = None):
+    """Log tensor statistics for debugging"""
+    if not DEBUG_INTERMEDIATE_OUTPUTS:
+        return
+
+    layer_prefix = f"Layer-{layer_idx}: " if layer_idx is not None else ""
+    print(f"[TRT-LLM DEBUG] {layer_prefix}{name}")
+    print(f"  Shape: {tensor.shape}")
+    print(f"  Dtype: {tensor.dtype}")
+    print(f"  Mean: {tensor.float().mean().item():.6f}")
+    print(f"  Std: {tensor.float().std().item():.6f}")
+    print(f"  Min: {tensor.float().min().item():.6f}")
+    print(f"  Max: {tensor.float().max().item():.6f}")
+    print(f"  First few values: {tensor.flatten()[:5].float()}")
+    print(f"  Last few values: {tensor.flatten()[-5:].float()}")
+
+    # Optionally save tensor to file
+    if SAVE_DEBUG_TENSORS:
+        import os
+        os.makedirs("debug_tensors", exist_ok=True)
+        safe_name = name.replace(" ", "_").replace("/", "_").replace(":", "_")
+        layer_str = f"_layer_{layer_idx}" if layer_idx is not None else ""
+        filename = f"debug_tensors/trtllm_{safe_name}{layer_str}.pt"
+        torch.save(tensor.detach().cpu(), filename)
+        print(f"  Saved to: {filename}")
+
+    print()
+
 
 class Gemma3TextScaledWordEmbedding(Embedding):
 
@@ -216,21 +249,42 @@ class Gemma3DecoderLayer(DecoderLayer):
         **kwargs,
     ) -> torch.Tensor:
 
+        debug_log_tensor("Input to layer", hidden_states, self.layer_idx)
+
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
+        debug_log_tensor("After input_layernorm", hidden_states, self.layer_idx)
+
         hidden_states = self.self_attn(
             position_ids=position_ids,
             hidden_states=hidden_states,
             attn_metadata=attn_metadata,
             **kwargs,
         )
+        debug_log_tensor("After self_attn", hidden_states, self.layer_idx)
+
         hidden_states = self.post_attention_layernorm(hidden_states)
+        debug_log_tensor("After post_attention_layernorm", hidden_states,
+                         self.layer_idx)
+
         hidden_states = residual + hidden_states
+        debug_log_tensor("After attention residual", hidden_states,
+                         self.layer_idx)
+
         residual = hidden_states
         hidden_states = self.pre_feedforward_layernorm(hidden_states)
+        debug_log_tensor("After pre_feedforward_layernorm", hidden_states,
+                         self.layer_idx)
+
         hidden_states = self.mlp(hidden_states)
+        debug_log_tensor("After MLP", hidden_states, self.layer_idx)
+
         hidden_states = self.post_feedforward_layernorm(hidden_states)
+        debug_log_tensor("After post_feedforward_layernorm", hidden_states,
+                         self.layer_idx)
+
         hidden_states = residual + hidden_states
+        debug_log_tensor("After MLP residual", hidden_states, self.layer_idx)
 
         return hidden_states
 
@@ -278,6 +332,7 @@ class Gemma3TextModel(DecoderModel):
             inputs_embeds = self.embed_tokens(input_ids)
 
         hidden_states = inputs_embeds.to(self.dtype)
+        debug_log_tensor("after_embed_tokens", hidden_states)
 
         for decoder_layer in self.layers:
             hidden_states = decoder_layer(position_ids=position_ids,
@@ -285,6 +340,7 @@ class Gemma3TextModel(DecoderModel):
                                           attn_metadata=attn_metadata)
 
         hidden_states = self.norm(hidden_states)
+        debug_log_tensor("after_final_norm", hidden_states)
         return hidden_states
 
 
@@ -318,12 +374,14 @@ class Gemma3ForCausalLM(DecoderModelForCausalLM[Gemma3TextModel,
             inputs_embeds=inputs_embeds,
         )
 
-        return self.logits_processor.forward(
+        logits = self.logits_processor.forward(
             output,
             self.lm_head,
             attn_metadata,
             return_context_logits,
         )
+        debug_log_tensor("Final logits", logits)
+        return logits
 
     # This is a modified version of the load_weights function in modeling_utils.py with the
     # minor change for Gemma3 RMSNorm.
