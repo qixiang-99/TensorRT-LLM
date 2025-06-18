@@ -3,8 +3,9 @@ from dataclasses import dataclass
 
 import torch
 from parameterized import parameterized
-from transformers import Gemma3ForCausalLM as HfGemmaForCausalLM
-from transformers import Gemma3TextConfig
+from transformers.models.gemma3.modeling_gemma3 import \
+    Gemma3ForCausalLM as HfGemmaForCausalLM
+from transformers.models.gemma3.modeling_gemma3 import Gemma3TextConfig
 from utils.util import getSMVersion
 
 import tensorrt_llm
@@ -54,9 +55,11 @@ def debug_log_hf_tensor(name: str, tensor: torch.Tensor, layer_idx: int = None):
 
 
 def compare_tensors(name: str,
-                    tensor1: torch.Tensor,
-                    tensor2: torch.Tensor,
-                    layer_idx: int = None):
+                    test_tensor: torch.Tensor,
+                    ref_tensor: torch.Tensor,
+                    atol: float = 1e-2,
+                    rtol: float = 1e-2,
+                    layer_idx: int = None) -> bool:
     """Compare two tensors and log differences"""
     if not DEBUG_INTERMEDIATE_OUTPUTS:
         return
@@ -65,26 +68,61 @@ def compare_tensors(name: str,
     print(f"[COMPARISON] {layer_prefix}{name}")
 
     # Ensure same shape
-    if tensor1.shape != tensor2.shape:
-        print(f"  Shape mismatch: {tensor1.shape} vs {tensor2.shape}")
-        return
+    if test_tensor.shape != ref_tensor.shape:
+        print(f"  Shape mismatch: {test_tensor.shape} vs {ref_tensor.shape}")
+        return False
 
-    # Calculate differences
-    diff = (tensor1 - tensor2).float()
-    abs_diff = torch.abs(diff)
+    # Calculate differences with epsilon to avoid division by zero
+    # Choose epsilon based on the original tensor dtype
+    if ref_tensor.dtype == torch.float16:
+        eps = 1e-4
+    elif ref_tensor.dtype == torch.bfloat16:
+        eps = 1e-3
+    elif ref_tensor.dtype == torch.float32:
+        eps = 1e-8
+    else:
+        # Default epsilon for other dtypes
+        eps = 1e-6
 
-    print(f"  Max absolute difference: {abs_diff.max().item():.6f}")
-    print(f"  Mean absolute difference: {abs_diff.mean().item():.6f}")
-    print(f"  Std of differences: {diff.std().item():.6f}")
+    # Convert to float and add epsilon to denominator to prevent division by zero
+    test_float = test_tensor.float()
+    ref_float = ref_tensor.float()
+    rel_diff = (test_float - ref_float) / (abs(ref_float) + eps)
+    abs_diff = torch.abs(rel_diff)
+
+    # Find the position of maximum relative difference
+    max_diff_flat_idx = torch.argmax(abs_diff)
+    max_diff_position = torch.unravel_index(max_diff_flat_idx, abs_diff.shape)
+    max_diff_value = abs_diff.max().item()
+
+    print(f"  Max relative difference: {max_diff_value:.6f}")
+    print(f"  Max difference position: {max_diff_position}")
+    print(f"  Mean relative difference: {abs_diff.mean().item():.6f}")
+    print(f"  Std of relative differences: {abs_diff.std().item():.6f}")
+
+    # Show the actual values at the max difference position
+    if len(max_diff_position) > 0:
+        test_val = test_tensor[max_diff_position].item()
+        ref_val = ref_tensor[max_diff_position].item()
+        print(
+            f"  At max diff position={max_diff_position} - Test: {test_val:.6f}, Ref: {ref_val:.6f}"
+        )
 
     # Check if tensors are close
     try:
-        torch.testing.assert_close(tensor1, tensor2, atol=1e-3, rtol=1e-3)
-        print(f"  ✓ Tensors are close (atol=1e-3, rtol=1e-3)")
+        torch.testing.assert_close(test_tensor,
+                                   ref_tensor,
+                                   atol=atol,
+                                   rtol=rtol)
+        print(f"  ✓ Tensors are close (atol={atol}, rtol={rtol})")
+        return True
     except AssertionError:
-        print(f"  ✗ Tensors differ significantly")
+        print(f"  ✗ Tensors differ significantly (atol={atol}, rtol={rtol})")
+        print(f" test_tensor: {test_tensor}")
+        print("=" * 80)
+        print(f" ref_tensor: {ref_tensor}")
 
-    print()
+        return False
 
 
 def enable_debug_logging(save_tensors=False):
@@ -128,7 +166,7 @@ class TestGemma3(unittest.TestCase):
         # Enable debug logging - set to True to see detailed intermediate outputs
         # Change this to True when you want to debug
         if True:  # Set to True to enable debug logging
-            enable_debug_logging(save_tensors=True)
+            enable_debug_logging(save_tensors=False)
             print("=" * 80)
             print("DEBUG LOGGING ENABLED - Comparing intermediate outputs")
             print("=" * 80)
@@ -156,36 +194,63 @@ class TestGemma3(unittest.TestCase):
             GEMMA3_MODEL_PATH, torch_dtype=dtype).to(device).eval()
 
         # Add hooks to capture HF intermediate outputs
-        def create_hook(name):
+        def create_pre_hook(name):
 
-            def hook(module, input, output):
+            def hook(module,
+                     input):  # Note: no 'output' parameter for pre-hooks
+                if DEBUG_INTERMEDIATE_OUTPUTS:
+                    if isinstance(input, tuple) and len(input) > 0:
+                        tensor_input = input[0]
+                    else:
+                        tensor_input = input
+                    # copy the tensor to avoid modifying the original tensor
+                    tensor_input = tensor_input.clone()
+                    # remove batch dimension
+                    if tensor_input.dim() > 2:
+                        tensor_input = tensor_input.squeeze(0)
+                    hf_intermediates[name] = tensor_input.detach()
+                    # debug_log_hf_tensor(f"HF {name}", tensor_input)
+
+            return hook
+
+        def create_post_hook(name):
+
+            def hook(module, input, output):  # Both input and output available
                 if DEBUG_INTERMEDIATE_OUTPUTS:
                     if isinstance(output, tuple):
-                        # For attention layers that return (output, attention_weights, past_key_value)
                         tensor_output = output[0]
                     else:
                         tensor_output = output
+                    # copy the tensor to avoid modifying the original tensor
+                    tensor_output = tensor_output.clone()
+                    if tensor_output.dim() > 2:
+                        tensor_output = tensor_output.squeeze(0)
                     hf_intermediates[name] = tensor_output.detach()
-                    debug_log_hf_tensor(f"HF {name}", tensor_output)
 
             return hook
 
         # Register hooks for embedding and layers
         hf_gemma.model.embed_tokens.register_forward_hook(
-            create_hook("embedding"))
+            create_post_hook("embedding"))
         for i, layer in enumerate(hf_gemma.model.layers):
+            # Capture input to layer norm
+            layer.input_layernorm.register_forward_pre_hook(
+                create_pre_hook(f"layer_{i}_input_layernorm_pre"))
+
+            # Capture output from layer norm
             layer.input_layernorm.register_forward_hook(
-                create_hook(f"layer_{i}_input_layernorm"))
+                create_post_hook(f"layer_{i}_input_layernorm"))
             layer.self_attn.register_forward_hook(
-                create_hook(f"layer_{i}_self_attention"))
+                create_post_hook(f"layer_{i}_self_attention"))
             layer.post_attention_layernorm.register_forward_hook(
-                create_hook(f"layer_{i}_post_attention_layernorm"))
+                create_post_hook(f"layer_{i}_post_attention_layernorm"))
             layer.pre_feedforward_layernorm.register_forward_hook(
-                create_hook(f"layer_{i}_pre_feedforward_layernorm"))
-            layer.mlp.register_forward_hook(create_hook(f"layer_{i}_mlp"))
+                create_post_hook(f"layer_{i}_pre_feedforward_layernorm"))
+            layer.mlp.register_forward_hook(create_post_hook(f"layer_{i}_mlp"))
             layer.post_feedforward_layernorm.register_forward_hook(
-                create_hook(f"layer_{i}_post_feedforward_layernorm"))
-        hf_gemma.model.norm.register_forward_hook(create_hook("final_norm"))
+                create_post_hook(f"layer_{i}_post_feedforward_layernorm"))
+        hf_gemma.model.norm.register_forward_hook(
+            create_post_hook("final_norm"))
 
         # The custom Gemma3 model has a different architecture from HF's Gemma,
         # so we can't load weights directly.
@@ -195,8 +260,12 @@ class TestGemma3(unittest.TestCase):
         gemma = Gemma3ForCausalLM(model_config).to(dtype).to(device).eval()
         gemma.load_weights(hf_gemma.state_dict())
 
-        num_blocks = 1
-        tokens_per_block = 128
+        # context
+        input_ids = torch.tensor([100, 200, 300, 100, 200, 100, 400, 500] * 50,
+                                 dtype=torch.int,
+                                 device=device)
+        tokens_per_block = 32
+        num_blocks = (input_ids.size(-1) // tokens_per_block) + 1
         head_dim = gemma.config.head_dim
         num_layers = gemma.config.num_hidden_layers
         num_kv_heads = gemma.config.num_key_value_heads
@@ -229,11 +298,6 @@ class TestGemma3(unittest.TestCase):
             dtype=kv_cache_dtype,
         )
 
-        # context
-        input_ids = torch.tensor([100, 200, 300, 100, 200, 100, 400, 500],
-                                 dtype=torch.int,
-                                 device=device)
-
         num_cached_tokens_per_seq = [0]
         request_ids = [1]
         token_nums = [input_ids.size(-1)]
@@ -259,6 +323,11 @@ class TestGemma3(unittest.TestCase):
         position_ids = [torch.arange(0, input_ids.size(-1))]
         position_ids = torch.cat(position_ids).unsqueeze(0).cuda()
         with torch.inference_mode():
+            # Clear any previous intermediate tensors
+            from tensorrt_llm._torch.models.modeling_gemma3 import (
+                clear_intermediate_tensors, get_intermediate_tensors)
+            clear_intermediate_tensors()
+
             if DEBUG_INTERMEDIATE_OUTPUTS:
                 print("\n" + "=" * 50)
                 print("RUNNING HF MODEL FORWARD PASS")
@@ -281,27 +350,54 @@ class TestGemma3(unittest.TestCase):
                                    position_ids=position_ids,
                                    attn_metadata=attn_metadata)
 
+            # Get TRT-LLM intermediate tensors
+            trtllm_intermediates = get_intermediate_tensors()
+
             if DEBUG_INTERMEDIATE_OUTPUTS:
                 print("\n" + "=" * 50)
                 print("COMPARING INTERMEDIATE OUTPUTS")
                 print("=" * 50)
 
-                # Compare final logits first
-                compare_tensors("Final logits", logits, ref.logits[:, -1])
+                # Compare embedding if available
+                if "embedding" in trtllm_intermediates and "embedding" in hf_intermediates:
+                    compare_tensors("Embedding",
+                                    trtllm_intermediates["embedding"],
+                                    hf_intermediates["embedding"])
 
-                # Note: Due to architectural differences, we can't directly compare all intermediates
-                # But we can see where they start diverging by looking at the debug logs above
-                print(
-                    "\nNote: Due to architectural differences between HF and TRT-LLM implementations,"
-                )
-                print(
-                    "direct intermediate comparisons may not be possible for all layers."
-                )
-                print(
-                    "Look at the debug logs above to identify where significant differences occur."
-                )
+                # Compare layer-wise intermediates (first few layers as example)
+                num_layers_to_compare = min(3,
+                                            hf_gemma_config.num_hidden_layers)
+                for i in range(num_layers_to_compare):
+                    # TRTLLM and HF share the same layer variable names
+                    layer_comparisons = [
+                        ("input_layernorm_pre",
+                         f"layer_{i}_input_layernorm_pre"),
+                        ("input_layernorm", f"layer_{i}_input_layernorm"),
+                        ("self_attention", f"layer_{i}_self_attention"),
+                        ("post_attention_layernorm",
+                         f"layer_{i}_post_attention_layernorm"),
+                        ("pre_feedforward_layernorm",
+                         f"layer_{i}_pre_feedforward_layernorm"),
+                        ("mlp", f"layer_{i}_mlp"),
+                        ("post_feedforward_layernorm",
+                         f"layer_{i}_post_feedforward_layernorm"),
+                    ]
+
+                    for component, key in layer_comparisons:
+                        assert key in trtllm_intermediates and key in hf_intermediates
+                        success = compare_tensors(f"Layer {i}: {key}",
+                                                  trtllm_intermediates[key],
+                                                  hf_intermediates[key],
+                                                  layer_idx=i)
+                        # if not success:
+                        #     # compare corresponding component weights
+                        #     # hf_weights = hf_gemma.model.layers[i].state_dict()[f"{component}.weight"]
+                        #     # trtllm_weights = gemma.model.layers[i].state_dict()[f"{component}.weight"]
+                        #     breakpoint()
+
                 print("=" * 50)
 
+        print(f"logits.shape: {logits.shape}")
         torch.testing.assert_close(logits,
                                    ref.logits[:, -1].float(),
                                    atol=0.4,
