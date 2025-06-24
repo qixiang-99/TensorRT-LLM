@@ -187,6 +187,8 @@ class Gemma3Attention(Attention):
             self.ln_events[1],
             self.aux_stream,
         )
+        debug_log_tensor("self_attn_q_norm", q, self.layer_idx)
+        debug_log_tensor("self_attn_k_norm", k, self.layer_idx)
 
         return q, k
 

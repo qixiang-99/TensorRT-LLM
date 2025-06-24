@@ -90,15 +90,34 @@ def compare_tensors(name: str,
     rel_diff = (test_float - ref_float) / (abs(ref_float) + eps)
     abs_diff = torch.abs(rel_diff)
 
-    # Find the position of maximum relative difference
-    max_diff_flat_idx = torch.argmax(abs_diff)
-    max_diff_position = torch.unravel_index(max_diff_flat_idx, abs_diff.shape)
-    max_diff_value = abs_diff.max().item()
+    # Find the positions of 10 maximum relative differences
+    top_k = min(10, abs_diff.numel())  # Don't exceed tensor size
+    top_k_values, top_k_flat_indices = torch.topk(abs_diff.flatten(), top_k)
+
+    # Convert flat indices to multi-dimensional positions
+    top_k_positions = [
+        torch.unravel_index(idx, abs_diff.shape) for idx in top_k_flat_indices
+    ]
+
+    max_diff_value = top_k_values[0].item()  # First value is the maximum
+    max_diff_position = top_k_positions[0]  # First position is the max position
 
     print(f"  Max relative difference: {max_diff_value:.6f}")
     print(f"  Max difference position: {max_diff_position}")
     print(f"  Mean relative difference: {abs_diff.mean().item():.6f}")
     print(f"  Std of relative differences: {abs_diff.std().item():.6f}")
+
+    # Show top 3 differences for more insight
+    if DEBUG_INTERMEDIATE_OUTPUTS and top_k > 1:
+        print(f"  Top {min(3, top_k)} largest differences:")
+        for i in range(min(3, top_k)):
+            pos = top_k_positions[i]
+            val = top_k_values[i].item()
+            test_val = test_tensor[pos].item()
+            ref_val = ref_tensor[pos].item()
+            print(
+                f"    #{i+1}: {val:.6f} at {pos} (Test: {test_val:.6f}, Ref: {ref_val:.6f})"
+            )
 
     # Show the actual values at the max difference position
     if len(max_diff_position) > 0:
@@ -225,6 +244,13 @@ class TestGemma3(unittest.TestCase):
                     tensor_output = tensor_output.clone()
                     if tensor_output.dim() > 2:
                         tensor_output = tensor_output.squeeze(0)
+                    # if module is q_norm, we need to reshape and get [seq, num_heads*head_dim]
+                    if "self_attn_q_norm" in name or "self_attn_k_norm" in name:
+                        # tensor_output shape here is [num_heads, seq_len, head_dim]
+                        seq_len = tensor_output.shape[1]
+                        tensor_output = tensor_output.permute(1, 0, 2).reshape(
+                            seq_len, -1)
+
                     hf_intermediates[name] = tensor_output.detach()
 
             return hook
@@ -240,6 +266,10 @@ class TestGemma3(unittest.TestCase):
             # Capture output from layer norm
             layer.input_layernorm.register_forward_hook(
                 create_post_hook(f"layer_{i}_input_layernorm"))
+            layer.self_attn.q_norm.register_forward_hook(
+                create_post_hook(f"layer_{i}_self_attn_q_norm"))
+            layer.self_attn.k_norm.register_forward_hook(
+                create_post_hook(f"layer_{i}_self_attn_k_norm"))
             layer.self_attn.register_forward_hook(
                 create_post_hook(f"layer_{i}_self_attention"))
             layer.post_attention_layernorm.register_forward_hook(
@@ -277,7 +307,7 @@ class TestGemma3(unittest.TestCase):
         print(f"Test prompt: '{test_prompt}'")
         print(f"Input tokens shape: {input_ids.shape}")
         print(f"Input tokens: {input_ids.tolist()}")
-        breakpoint()
+        # breakpoint()
 
         # context
         tokens_per_block = 32
@@ -389,6 +419,8 @@ class TestGemma3(unittest.TestCase):
                         ("input_layernorm_pre",
                          f"layer_{i}_input_layernorm_pre"),
                         ("input_layernorm", f"layer_{i}_input_layernorm"),
+                        ("self_attn_q_norm", f"layer_{i}_self_attn_q_norm"),
+                        ("self_attn_k_norm", f"layer_{i}_self_attn_k_norm"),
                         ("self_attention", f"layer_{i}_self_attention"),
                         ("post_attention_layernorm",
                          f"layer_{i}_post_attention_layernorm"),
@@ -405,11 +437,11 @@ class TestGemma3(unittest.TestCase):
                                                   trtllm_intermediates[key],
                                                   hf_intermediates[key],
                                                   layer_idx=i)
-                        # if not success:
-                        #     # compare corresponding component weights
-                        #     # hf_weights = hf_gemma.model.layers[i].state_dict()[f"{component}.weight"]
-                        #     # trtllm_weights = gemma.model.layers[i].state_dict()[f"{component}.weight"]
-                        #     breakpoint()
+                        if not success:
+                            # compare corresponding component weights
+                            # hf_weights = hf_gemma.model.layers[i].state_dict()[f"{component}.weight"]
+                            # trtllm_weights = gemma.model.layers[i].state_dict()[f"{component}.weight"]
+                            breakpoint()
 
                 print("=" * 50)
 
