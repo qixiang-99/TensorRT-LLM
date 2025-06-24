@@ -260,10 +260,26 @@ class TestGemma3(unittest.TestCase):
         gemma = Gemma3ForCausalLM(model_config).to(dtype).to(device).eval()
         gemma.load_weights(hf_gemma.state_dict())
 
+        # Load tokenizer to convert prompt to real input_ids
+        from transformers import AutoTokenizer
+        tokenizer = AutoTokenizer.from_pretrained(GEMMA3_MODEL_PATH)
+
+        # Test prompt - you can customize this
+        test_prompt = "Hello world, this is a test prompt for Gemma 3 model evaluation."
+
+        # Tokenize the prompt to get real input_ids
+        input_ids = tokenizer.encode(test_prompt,
+                                     return_tensors="pt",
+                                     add_special_tokens=True)
+        input_ids = input_ids.squeeze(0).to(
+            device)  # Remove batch dimension and move to device
+
+        print(f"Test prompt: '{test_prompt}'")
+        print(f"Input tokens shape: {input_ids.shape}")
+        print(f"Input tokens: {input_ids.tolist()}")
+        breakpoint()
+
         # context
-        input_ids = torch.tensor([100, 200, 300, 100, 200, 100, 400, 500] * 50,
-                                 dtype=torch.int,
-                                 device=device)
         tokens_per_block = 32
         num_blocks = (input_ids.size(-1) // tokens_per_block) + 1
         head_dim = gemma.config.head_dim
